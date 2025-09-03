@@ -1,6 +1,18 @@
+mp.set_property("osc", "no")
+if mp.get_script_name() ~= "osc" then
+    -- reclaim osc script name after the builtin osc unloads
+    local script_path = debug.getinfo(1, "S").source:match("^@?(.*[\\/]osc%.lua)$")
+    if script_path then
+        mp.add_timeout(0.05, function()
+            mp.commandv("load-script", script_path)
+        end)
+        return
+    end
+end
 local assdraw = require 'mp.assdraw'
 local msg = require 'mp.msg'
 local opt = require 'mp.options'
+local utils = require 'mp.utils'
 
 --
 -- Parameters
@@ -223,6 +235,11 @@ local function set_osc_styles()
     }
 end
 
+local function create_osd_overlay(...)
+    if not mp.create_osd_overlay then return end
+    return mp.create_osd_overlay(...)
+end
+
 -- internal states, do not touch
 local state = {
     showtime = nil,                         -- time of last invocation (last mouse move)
@@ -263,6 +280,12 @@ local state = {
     osc_chapterlist_warned = false,
     osc_playlist_warned = false,
     osc_tracklist_warned = false,
+}
+
+local thumbfast = {
+    width = 0,
+    height = 0,
+    disabled = false
 }
 
 local logo_lines = {
@@ -314,6 +337,8 @@ local function set_osd(res_x, res_y, text, z)
     state.osd.z = z
     state.osd:update()
 end
+
+set_osd = state.osd and set_osd or mp.set_osd_ass
 
 local function set_time_styles(timetotal_changed, timems_changed)
     if timetotal_changed then
@@ -550,7 +575,12 @@ local function update_margins()
         reset_margins()
     end
 
-    mp.set_property_native("user-data/osc/margins", margins)
+    if mp.del_property then
+        mp.set_property_native("user-data/osc/margins", margins)
+    elseif utils.shared_script_property_set then
+        utils.shared_script_property_set("osc-margins",
+            string.format("%f,%f,%f,%f", margins.l, margins.r, margins.t, margins.b))
+    end
 end
 
 local tick
@@ -589,8 +619,12 @@ end
 
 local function render_wipe()
     msg.trace("render_wipe()")
-    state.osd.data = "" -- allows set_osd to immediately update on enable
-    state.osd:remove()
+    if state.osd then
+        state.osd.data = "" -- allows set_osd to immediately update on enable
+        state.osd:remove()
+    else
+        set_osd(0, 0, "{}")
+    end
 end
 
 
@@ -996,6 +1030,7 @@ local function render_elements(master_ass)
                     end
 
                     local tx = get_virt_mouse_pos()
+                    local thumb_tx = tx
                     if slider_lo.adjust_tooltip then
                         if an == 2 then
                             if sliderpos < (s_min + 3) then
@@ -1020,6 +1055,44 @@ local function render_elements(master_ass)
                     ass_append_alpha(elem_ass, slider_lo.alpha, 0)
                     elem_ass:append(tooltiplabel)
 
+                    -- thumbnail
+                    if not thumbfast.disabled and thumbfast.width ~= 0 and thumbfast.height ~= 0 then
+                        local osd_w = mp.get_property_number("osd-width")
+                        if osd_w then
+                            local r_w, r_h = get_virt_scale_factor()
+
+                            local tooltip_font_size = (user_opts.layout == "box" or user_opts.layout == "slimbox") and 2 or 12
+                            local thumb_ty = user_opts.layout ~= "topbar" and element.hitbox.y1 - 8 or element.hitbox.y2 + tooltip_font_size + 8
+
+                            local thumb_pad = 2
+                            local thumb_margin_x = 20 / r_w
+                            local thumb_margin_y = (4 + user_opts.tooltipborder) / r_h + thumb_pad
+                            local thumb_x = math.min(osd_w - thumbfast.width - thumb_margin_x, math.max(thumb_margin_x, thumb_tx / r_w - thumbfast.width / 2))
+                            local thumb_y = user_opts.layout ~= "topbar" and thumb_ty / r_h - thumbfast.height - tooltip_font_size / r_h - thumb_margin_y or thumb_ty / r_h + thumb_margin_y
+
+                            thumb_x = math.floor(thumb_x + 0.5)
+                            thumb_y = math.floor(thumb_y + 0.5)
+
+                            elem_ass:new_event()
+                            elem_ass:pos(thumb_x * r_w, thumb_y * r_h)
+                            elem_ass:an(7)
+                            elem_ass:append(osc_styles.timePosBar)
+                            elem_ass:append("{\\1a&H20&}")
+                            elem_ass:draw_start()
+                            elem_ass:rect_cw(-thumb_pad * r_w, -thumb_pad * r_h, (thumbfast.width + thumb_pad) * r_w, (thumbfast.height + thumb_pad) * r_h)
+                            elem_ass:draw_stop()
+
+                            mp.commandv("script-message-to", "thumbfast", "thumb",
+                                mp.get_property_number("duration", 0) * (sliderpos / 100),
+                                thumb_x,
+                                thumb_y
+                            )
+                        end
+                    end
+                else
+                    if thumbfast.width ~= 0 and thumbfast.height ~= 0 then
+                        mp.commandv("script-message-to", "thumbfast", "clear")
+                    end
                 end
             end
 
@@ -2208,6 +2281,9 @@ end
 
 local function hide_osc()
     msg.trace("hide_osc")
+    if thumbfast.width ~= 0 and thumbfast.height ~= 0 then
+        mp.commandv("script-message-to", "thumbfast", "clear")
+    end
     if not state.enabled then
         -- typically hide happens at render() from tick(), but now tick() is
         -- no-op and won't render again to remove the osc, so do that manually.
@@ -2332,8 +2408,8 @@ end
 local function do_enable_keybindings()
     if state.enabled then
         if not state.showhide_enabled then
-            mp.enable_key_bindings("showhide", "allow-vo-dragging+allow-hide-cursor")
-            mp.enable_key_bindings("showhide_wc", "allow-vo-dragging+allow-hide-cursor")
+            mp.enable_key_bindings("thumbfast-osc-showhide", "allow-vo-dragging+allow-hide-cursor")
+            mp.enable_key_bindings("thumbfast-osc-showhide_wc", "allow-vo-dragging+allow-hide-cursor")
         end
         state.showhide_enabled = true
     end
@@ -2346,8 +2422,8 @@ local function enable_osc(enable)
     else
         hide_osc() -- acts immediately when state.enabled == false
         if state.showhide_enabled then
-            mp.disable_key_bindings("showhide")
-            mp.disable_key_bindings("showhide_wc")
+            mp.disable_key_bindings("thumbfast-osc-showhide")
+            mp.disable_key_bindings("thumbfast-osc-showhide_wc")
         end
         state.showhide_enabled = false
     end
@@ -2422,14 +2498,14 @@ local function render()
 
     --mouse show/hide area
     for _, cords in pairs(osc_param.areas["showhide"]) do
-        set_virt_mouse_area(cords.x1, cords.y1, cords.x2, cords.y2, "showhide")
+        set_virt_mouse_area(cords.x1, cords.y1, cords.x2, cords.y2, "thumbfast-osc-showhide")
     end
     if osc_param.areas["showhide_wc"] then
         for _, cords in pairs(osc_param.areas["showhide_wc"]) do
-            set_virt_mouse_area(cords.x1, cords.y1, cords.x2, cords.y2, "showhide_wc")
+            set_virt_mouse_area(cords.x1, cords.y1, cords.x2, cords.y2, "thumbfast-osc-showhide_wc")
         end
     else
-        set_virt_mouse_area(0, 0, 0, 0, "showhide_wc")
+        set_virt_mouse_area(0, 0, 0, 0, "thumbfast-osc-showhide_wc")
     end
     do_enable_keybindings()
 
@@ -2438,13 +2514,13 @@ local function render()
 
     for _,cords in ipairs(osc_param.areas["input"]) do
         if state.osc_visible then -- activate only when OSC is actually visible
-            set_virt_mouse_area(cords.x1, cords.y1, cords.x2, cords.y2, "input")
+            set_virt_mouse_area(cords.x1, cords.y1, cords.x2, cords.y2, "thumbfast-osc-input")
         end
         if state.osc_visible ~= state.input_enabled then
             if state.osc_visible then
-                mp.enable_key_bindings("input")
+                mp.enable_key_bindings("thumbfast-osc-input")
             else
-                mp.disable_key_bindings("input")
+                mp.disable_key_bindings("thumbfast-osc-input")
             end
             state.input_enabled = state.osc_visible
         end
@@ -2457,13 +2533,13 @@ local function render()
     if osc_param.areas["window-controls"] then
         for _,cords in ipairs(osc_param.areas["window-controls"]) do
             if state.osc_visible then -- activate only when OSC is actually visible
-                set_virt_mouse_area(cords.x1, cords.y1, cords.x2, cords.y2, "window-controls")
+                set_virt_mouse_area(cords.x1, cords.y1, cords.x2, cords.y2, "thumbfast-osc-window-controls")
             end
             if state.osc_visible ~= state.windowcontrols_buttons then
                 if state.osc_visible then
-                    mp.enable_key_bindings("window-controls")
+                    mp.enable_key_bindings("thumbfast-osc-window-controls")
                 else
-                    mp.disable_key_bindings("window-controls")
+                    mp.disable_key_bindings("thumbfast-osc-window-controls")
                 end
                 state.windowcontrols_buttons = state.osc_visible
             end
@@ -2481,9 +2557,9 @@ local function render()
             end
             if state.osc_visible ~= state.windowcontrols_title then
                 if state.osc_visible then
-                    mp.enable_key_bindings("window-controls-title", "allow-vo-dragging")
+                    mp.enable_key_bindings("thumbfast-osc-window-controls-title", "allow-vo-dragging")
                 else
-                    mp.disable_key_bindings("window-controls-title", "allow-vo-dragging")
+                    mp.disable_key_bindings("thumbfast-osc-window-controls-title", "allow-vo-dragging")
                 end
                 state.windowcontrols_title = state.osc_visible
             end
@@ -2578,8 +2654,8 @@ tick = function()
         set_osd(display_w, display_h, ass.text, -1000)
 
         if state.showhide_enabled then
-            mp.disable_key_bindings("showhide")
-            mp.disable_key_bindings("showhide_wc")
+            mp.disable_key_bindings("thumbfast-osc-showhide")
+            mp.disable_key_bindings("thumbfast-osc-showhide_wc")
             state.showhide_enabled = false
         end
 
@@ -2613,7 +2689,11 @@ end
 
 local function shutdown()
     reset_margins()
-    mp.del_property("user-data/osc")
+    if mp.del_property then
+        mp.del_property("user-data/osc")
+    elseif utils.shared_script_property_set then
+        utils.shared_script_property_set("osc-margins", nil)
+    end
 end
 
 -- duration is observed for the sole purpose of updating chapter markers
@@ -2732,11 +2812,11 @@ mp.observe_property('touch-pos', 'native', handle_touch)
 mp.set_key_bindings({
     {"mouse_move",              function() process_event("mouse_move", nil) end},
     {"mouse_leave",             mouse_leave},
-}, "showhide", "force")
+}, "thumbfast-osc-showhide", "force")
 mp.set_key_bindings({
     {"mouse_move",              function() process_event("mouse_move", nil) end},
     {"mouse_leave",             mouse_leave},
-}, "showhide_wc", "force")
+}, "thumbfast-osc-showhide_wc", "force")
 do_enable_keybindings()
 
 --mouse input bindings
@@ -2755,14 +2835,14 @@ mp.set_key_bindings({
     {"mbtn_left_dbl",       "ignore"},
     {"shift+mbtn_left_dbl", "ignore"},
     {"mbtn_right_dbl",      "ignore"},
-}, "input", "force")
-mp.enable_key_bindings("input")
+}, "thumbfast-osc-input", "force")
+mp.enable_key_bindings("thumbfast-osc-input")
 
 mp.set_key_bindings({
-    {"mbtn_left",           function() process_event("mbtn_left", "up") end,
-                            function() process_event("mbtn_left", "down")  end},
-}, "window-controls", "force")
-mp.enable_key_bindings("window-controls")
+    {"mbtn_left",           function(e) process_event("mbtn_left", "up") end,
+                            function(e) process_event("mbtn_left", "down")  end},
+}, "thumbfast-osc-window-controls", "force")
+mp.enable_key_bindings("thumbfast-osc-window-controls")
 
 local function always_on(val)
     if state.enabled then
@@ -2803,7 +2883,11 @@ local function visibility_mode(mode, no_osd)
     end
 
     user_opts.visibility = mode
-    mp.set_property_native("user-data/osc/visibility", mode)
+    if mp.del_property then
+        mp.set_property_native("user-data/osc/visibility", mode)
+    elseif utils.shared_script_property_set then
+        utils.shared_script_property_set("osc-visibility", mode)
+    end
 
     if not no_osd and tonumber(mp.get_property("osd-level")) >= 1 then
         mp.osd_message("OSC visibility: " .. mode)
@@ -2812,8 +2896,8 @@ local function visibility_mode(mode, no_osd)
     -- Reset the input state on a mode change. The input state will be
     -- recalculated on the next render cycle, except in 'never' mode where it
     -- will just stay disabled.
-    mp.disable_key_bindings("input")
-    mp.disable_key_bindings("window-controls")
+    mp.disable_key_bindings("thumbfast-osc-input")
+    mp.disable_key_bindings("thumbfast-osc-window-controls")
     state.input_enabled = false
 
     update_margins()
@@ -2835,7 +2919,11 @@ local function idlescreen_visibility(mode, no_osd)
         user_opts.idlescreen = false
     end
 
-    mp.set_property_native("user-data/osc/idlescreen", user_opts.idlescreen)
+    if mp.del_property then
+        mp.set_property_native("user-data/osc/idlescreen", user_opts.idlescreen)
+    elseif utils.shared_script_property_set then
+        utils.shared_script_property_set("osc-idlescreen", mode)
+    end
 
     if not no_osd and tonumber(mp.get_property("osd-level")) >= 1 then
         mp.osd_message("OSC logo visibility: " .. tostring(mode))
@@ -2944,6 +3032,16 @@ set_tick_delay("display_fps", mp.get_property_number("display_fps"))
 visibility_mode(user_opts.visibility, true)
 update_duration_watch()
 
-set_virt_mouse_area(0, 0, 0, 0, "input")
-set_virt_mouse_area(0, 0, 0, 0, "window-controls")
-set_virt_mouse_area(0, 0, 0, 0, "window-controls-title")
+mp.register_script_message("thumbfast-info", function(json)
+    local data = utils.parse_json(json)
+    if type(data) ~= "table" or not data.width or not data.height then
+        msg.error("thumbfast-info: received json didn't produce a table with thumbnail information")
+    else
+        thumbfast = data
+    end
+end)
+
+set_virt_mouse_area(0, 0, 0, 0, "thumbfast-osc-input")
+set_virt_mouse_area(0, 0, 0, 0, "thumbfast-osc-window-controls")
+set_virt_mouse_area(0, 0, 0, 0, "thumbfast-osc-window-controls-title")
+

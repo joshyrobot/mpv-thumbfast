@@ -1,3 +1,11 @@
+# Default v0.40.0 OSC with [thumbfast](https://github.com/po5/thumbfast) support
+
+Copy [player/lua/osc.lua](player/lua/osc.lua) to your scripts folder after installing thumbfast.
+
+Original README below.
+
+---
+
 ![mpv logo](https://raw.githubusercontent.com/mpv-player/mpv.io/master/source/images/mpv-logo-128.png)
 
 # mpv
